@@ -1,0 +1,38 @@
+# 1️⃣ Node Modules (dependencies installed via npm)
+node_modulesce
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 2️⃣ Logs
+logs
+*.log
+npm-debug.log
+yarn-debug.log
+debug.log
+log.json
+
+# 3️⃣ Environment Variables (Secret Keys & Configs)
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# 4️⃣ Editor & System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 5️⃣ Temporary Files & Cache
+.tmp/
+dist/
+coverage/
+.cache/
+
+# 6️⃣ Docker Files (if using Docker)
+docker-compose.override.yml
+
+# 7️⃣ Build Files (if applicable)
+build/
