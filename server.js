@@ -1,55 +1,51 @@
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const { exec } = require("child_process");
-const crypto = require("crypto");
- 
+import express from "express";
+import cors from "cors";
+import { createServer } from "http";
+import { Server } from "socket.io";
+import codeRoutes from "./routes/code.js";
+import roomRoutes from "./routes/rooms.js";
+
 const app = express();
+const server = createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+});
+
 app.use(cors());
 app.use(express.json());
 
-const tempDir = path.join(__dirname, ".temp"); // Create a temp directory
-if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+// API Routes
+app.use("/code", codeRoutes);
+app.use("/rooms", roomRoutes);
 
-app.post("/run", (req, res) => {
-  const { language, code } = req.body;
-  const uniqueID = crypto.randomBytes(4).toString("hex");
+// In-memory store for real-time collaboration
+let roomCodeState = {};
 
-  let fileExtension = language === "python" ? "py" : "js";
-  const tempFile = path.join(tempDir, `script_${uniqueID}.${fileExtension}`);
+io.on("connection", (socket) => {
+  console.log("A user connected:", socket.id);
 
-  fs.writeFileSync(tempFile, code); // Save user code to temp file
+  socket.on("joinRoom", ({ roomId }) => {
+    console.log(`User ${socket.id} joined room ${roomId}`);
 
-  let dockerCommand;
-  if (language === "javascript") {
-    dockerCommand = `docker run --rm -v ${tempFile}:/app/script.js node node /app/script.js`;
-  } else if (language === "python") {
-    dockerCommand = `docker run --rm -v ${tempFile}:/app/script.py python python3 /app/script.py`;
-  } else {
-    return res.status(400).json({ output: "Unsupported language" });
-  }
+    // Ensure the socket joins the correct room
+    socket.join(roomId);
 
-  console.log("🔹 Executing Docker command:", dockerCommand);
-
-  exec(dockerCommand, (error, stdout, stderr) => {
-    console.log("🔹 Docker execution completed!");
-
-    if (error) {
-      console.log("❌ Error:", stderr);
-      return res.json({ output: stderr });
+    // Send current code state to new user
+    if (roomCodeState[roomId]) {
+      socket.emit("codeUpdate", roomCodeState[roomId]);
     }
+  });
 
-    res.json({ output: stdout || "No output" });
+  socket.on("codeChange", ({ roomId, code }) => {
+    roomCodeState[roomId] = code;
 
-    // Delete the temp file after execution
-    setTimeout(() => {
-      fs.unlink(tempFile, (err) => {
-        if (err) console.error("Error deleting temp file:", err);
-      });
-    }, 5000);
+    // Broadcast changes only to users in the same room
+    socket.to(roomId).emit("codeUpdate", code);
   });
 });
 
 const PORT = 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
