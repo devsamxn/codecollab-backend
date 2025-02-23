@@ -1,3 +1,5 @@
+import dotenv from "dotenv";
+dotenv.config();
 import express from "express";
 import cors from "cors";
 import { createServer } from "http";
@@ -16,9 +18,12 @@ const tempDir = path.join(__dirname, "./.temp");
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
 const app = express();
+// app.use(express.static(__dirname));
+// const key = fs.readFileSync("cert.key");
+// const cert = fs.readFileSync("cert.crt");
 const server = createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: { origin: process.env.FRONTEND_URL, methods: ["GET", "POST"] },
 });
 
 app.use(cors());
@@ -30,22 +35,22 @@ console.log(rooms);
 
 // 🔹 Get List of Available Rooms from Redis
 app.get("/rooms/list", async (req, res) => {
-  const keys = await redis.keys("room:*");
-  const roomList = await Promise.all(
-    keys.map(async (key) => {
-      const room = await redis.hgetall(key);
-      return { roomId: key.replace("room:", ""), ...room };
-    })
-  );
-
-  res.json(roomList);
+  try {
+    const keys = await redis.keys("room:*");
+    // Extract only room IDs
+    const roomList = keys.map((key) => key.replace("room:", ""));
+    res.status(200).json(roomList);
+  } catch (error) {
+    console.error("Error fetching rooms:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 // API Endpoint to manually save code
 app.post("/rooms/save", async (req, res) => {
   const { roomId, code } = req.body;
 
-  if (!roomId || !code || code=="") {
+  if (!roomId || !code || code == "") {
     return res.status(400).json({ error: "Room ID and code are required" });
   }
 
@@ -61,8 +66,8 @@ app.post("/rooms/save", async (req, res) => {
 
 // 🔹 WebSocket Logic for Real-time Collaboration
 io.on("connection", (socket) => {
+  // 🔹 Normal Signaling Events
   console.log("A user connected:", socket.id);
-  // ({ roomId, error })
   socket.on("createRoom", async ({ password }, callback) => {
     if (!password) callback({ error: "Password required" });
     const roomId = crypto.randomBytes(4).toString("hex");
@@ -75,7 +80,7 @@ io.on("connection", (socket) => {
       code: "// Start coding...",
       output: "No output",
     };
-    callback({ roomId });
+    callback({ roomId, code: "// Start coding..." });
     await redis.hset(`room:${roomId}`, {
       password,
       code: "// Start coding...",
@@ -86,21 +91,18 @@ io.on("connection", (socket) => {
 
   socket.on("joinRoom", async ({ roomId, password }, callback) => {
     console.log(rooms);
-    let roomData = rooms[roomId];
-    if (roomData === undefined)
-      roomData = await redis.hgetall(`room:${roomId}`);
-    console.log(roomData);
+    let roomData = rooms[roomId] || (await redis.hgetall(`room:${roomId}`));
     if (!roomData) return callback({ error: "Room not found" });
     if (String(roomData.password) !== password)
       return callback({ error: "Incorrect password" });
 
-    console.log(`🔗 User ${socket.id} joining room: ${roomId}`);
-    socket.join(roomId);
-
     if (!rooms[roomId]) rooms[roomId] = { ...roomData, users: [] };
-    if (!rooms[roomId].users.includes(socket.id))
-      rooms[roomId].users.push(socket.id);
-
+    if (rooms[roomId].users.length >= 2) {
+      return callback({ error: "Room is full! Only 2 users allowed." });
+    }
+    rooms[roomId].users.push(socket.id);
+    socket.join(roomId);
+    console.log(`🔗 User ${socket.id} joining room: ${roomId}`);
     console.log("🛠️ Room state after join:", rooms[roomId]);
 
     socket.emit("codeUpdate", rooms[roomId].code);
@@ -125,17 +127,19 @@ io.on("connection", (socket) => {
     const tempFile = path.join(tempDir, `script_${uniqueID}.${extension}`);
 
     fs.writeFileSync(tempFile, code);
-
-    let dockerCommand;
+    // let dockerCommand
+    let command;
     if (language === "javascript") {
-      dockerCommand = `docker run --rm -v ${tempFile}:/app/script.js node node /app/script.js`;
+      command = `node ${tempFile}`;
+      // dockerCommand = `docker run --rm -v ${tempFile}:/app/script.js node node /app/script.js`;
     } else if (language === "python") {
-      dockerCommand = `docker run --rm -v ${tempFile}:/app/script.py python python3 /app/script.py`;
+      command = `python3 ${tempFile}`;
+      // dockerCommand = `docker run --rm -v ${tempFile}:/app/script.py python python3 /app/script.py`;
     } else {
       return io.to(roomId).emit("outputUpdate", "Unsupported language");
     }
 
-    exec(dockerCommand, (error, stdout, stderr) => {
+    exec(command, (error, stdout, stderr) => {
       const output = error ? stderr : stdout || "No Output";
       rooms[roomId].output = output;
       console.log(`Execution done for room: ${roomId}`);
@@ -145,6 +149,29 @@ io.on("connection", (socket) => {
 
       setTimeout(() => fs.unlink(tempFile, (err) => {}), 5000);
     });
+  });
+
+  socket.on("leaveRoom", ({ roomId }) => {
+    console.log(`User ${socket.id} is leaving Room: ${roomId}`);
+
+    if (!rooms[roomId]) return;
+
+    // Remove the user from the room
+    rooms[roomId].users = rooms[roomId].users.filter(
+      (user) => user !== socket.id
+    );
+
+    // If no users left, delete the room
+    if (rooms[roomId].users.length === 0) {
+      delete rooms[roomId];
+      console.log(`Room ${roomId} deleted (no users left).`);
+    }
+
+    // Notify others in the room that the user left
+    // socket.to(roomId).emit("userLeft", { userId: socket.id });
+
+    // Leave the actual socket room
+    socket.leave(roomId);
   });
 
   socket.on("disconnect", () => {
@@ -157,6 +184,33 @@ io.on("connection", (socket) => {
       if (rooms[roomId].users.length === 0) delete rooms[roomId];
     }
   });
+
+  // 🔹 WebRTC Signaling Events
+  // 📡 Handling WebRTC Offers
+  socket.on("offer", ({ roomId, offer }) => {
+    console.log(`📡 Offer from ${socket.id} in Room: ${roomId}`);
+    socket.to(roomId).emit("offer", { senderId: socket.id, offer });
+  });
+
+  // 📡 Handling WebRTC Answers
+  socket.on("answer", ({ roomId, answer, senderId }) => {
+    console.log(
+      `📡 Answer from ${socket.id} to ${senderId} in Room: ${roomId}`
+    );
+    socket.to(senderId).emit("answer", { answer });
+  });
+
+  // 📡 Handling ICE Candidates
+  socket.on("iceCandidate", ({ roomId, candidate, senderId }) => {
+    console.log(`📡 ICE Candidate from ${socket.id} in Room: ${roomId}`);
+    socket.to(senderId).emit("iceCandidate", { candidate });
+  });
+
+  // 📡 Handling User Disconnection
+  socket.on("userDisconnected", ({ roomId }) => {
+    console.log(`❌ User ${socket.id} left Room: ${roomId}`);
+    socket.to(roomId).emit("userDisconnected", { userId: socket.id });
+  });
 });
 
 // 🔹 Auto-save Code to Redis Every 2 Minutes
@@ -167,5 +221,7 @@ setInterval(async () => {
   }
 }, 60000 * 10); // Saves every 10 minutes
 
-const PORT = 5000;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const PORT = 8181;
+server.listen(PORT, () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
+});
